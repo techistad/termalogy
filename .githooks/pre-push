@@ -2,10 +2,16 @@
 
 set -euo pipefail
 
-current_branch="$(git rev-parse --abbrev-ref HEAD)"
+blocked=0
 
-if [[ "$current_branch" == "main" ]]; then
-  echo "[Termalogy] Direct pushes from 'main' are blocked."
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "$local_ref" == "refs/heads/main" ]]; then
+    blocked=1
+  fi
+done
+
+if [[ "$blocked" -eq 1 ]]; then
+  echo "[Termalogy] Direct pushes to 'main' are blocked."
   echo "Create a feature branch and open a PR instead."
   exit 1
 fi
