@@ -13,11 +13,14 @@ public partial class MainWindow : Window
 {
     private const string RepoOwner = "techistad";
     private const string RepoName = "termalogy";
+    private const string StartupArg = "--startup";
 
     private readonly StringBuilder _screenBuffer = new();
     private readonly List<string> _history = [];
     private readonly List<WindowSummary> _lastWindowList = [];
     private readonly AliasStore _aliasStore = new("TermalogySkin", "aliases.json");
+    private readonly AppSettingsStore _settingsStore = new("TermalogySkin", "settings.json");
+    private readonly StartupManager _startupManager = new("TermalogySkin");
     private readonly GitHubStatsService _gitHubStatsService = new();
     private readonly Dictionary<string, string> _aliases;
     private readonly Dictionary<string, string> _appShortcuts = new(StringComparer.OrdinalIgnoreCase)
@@ -29,12 +32,21 @@ public partial class MainWindow : Window
         ["notepad"] = "notepad.exe",
         ["calc"] = "calc.exe",
         ["terminal"] = "wt.exe",
-        ["powershell"] = "pwsh.exe"
+        ["powershell"] = "pwsh.exe",
+        ["cmd"] = "cmd.exe",
+        ["explorer"] = "explorer.exe",
+        ["taskmgr"] = "taskmgr.exe",
+        ["paint"] = "mspaint.exe",
+        ["firefox"] = "firefox.exe",
+        ["brave"] = "brave.exe"
     };
 
+    private readonly bool _isStartupLaunch;
+    private AppSettings _settings;
     private string _workingDirectory;
     private int _historyIndex;
     private bool _commandRunning;
+    private bool _taskbarHiddenBySkin;
 
     public MainWindow()
     {
@@ -42,20 +54,45 @@ public partial class MainWindow : Window
 
         _workingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         _aliases = _aliasStore.Load();
+        _settings = _settingsStore.Load();
         _historyIndex = _history.Count;
+        _isStartupLaunch = Environment.GetCommandLineArgs()
+            .Any(arg => arg.Equals(StartupArg, StringComparison.OrdinalIgnoreCase));
 
         Activated += (_, _) => FocusCommandInput();
+        Closed += Window_Closed;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown";
         UpdateStatusBar();
-        AppendLine("Termalogy Skin v0.1");
+        AppendLine($"Termalogy Skin v{version}");
         AppendLine("terminal-first launcher for Windows");
         AppendLine("type 'help' for commands");
         AppendLine("panic hotkey: Ctrl+Alt+Backspace");
+
+        if (_isStartupLaunch)
+        {
+            AppendLine("startup launch detected");
+        }
+
+        if (_settings.StealthMode)
+        {
+            SetStealthMode(true, persist: false, announce: true);
+        }
+
         AppendLine(string.Empty);
         FocusCommandInput();
+    }
+
+    private void Window_Closed(object? sender, EventArgs e)
+    {
+        if (_taskbarHiddenBySkin)
+        {
+            TaskbarManager.SetVisible(true);
+            _taskbarHiddenBySkin = false;
+        }
     }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -181,11 +218,23 @@ public partial class MainWindow : Window
             case "open":
                 OpenTarget(args);
                 break;
+            case "apps":
+                ManageAppShortcuts(args);
+                break;
             case "run":
                 await RunShellCommandAsync(args);
                 break;
             case "top":
                 ToggleTopMode(args);
+                break;
+            case "startup":
+                ManageStartup(args);
+                break;
+            case "stealth":
+                ManageStealthMode(args);
+                break;
+            case "taskbar":
+                ManageTaskbar(args);
                 break;
             case "win":
                 ControlWindows(args);
@@ -218,23 +267,28 @@ public partial class MainWindow : Window
     private void ShowHelp()
     {
         AppendLine("commands:");
-        AppendLine("  help                     show this help");
-        AppendLine("  open <app|url|path>      launch gui app, file, folder, or url");
-        AppendLine("  run <cmd>                run a shell command and print output");
-        AppendLine("  pwd | cd <path>          get/set working directory");
-        AppendLine("  ls [path]                list files and folders");
-        AppendLine("  win list                 list visible windows");
-        AppendLine("  win close <index>        close window from latest list");
-        AppendLine("  alias list               list aliases");
-        AppendLine("  alias add <n> <cmd>      create alias");
-        AppendLine("  alias remove <n>         remove alias");
-        AppendLine("  alias path               show alias file location");
-        AppendLine("  version                  show app version");
-        AppendLine("  stats                    show GitHub usage metrics");
-        AppendLine("  about                    show project links");
-        AppendLine("  top on|off               keep skin window always on top");
-        AppendLine("  clear | cls              clear terminal output");
-        AppendLine("  exit | quit              close skin");
+        AppendLine("  help                      show this help");
+        AppendLine("  open <app|url|path>       launch gui app, file, folder, or url");
+        AppendLine("  apps list                 list built-in launcher shortcuts");
+        AppendLine("  apps find <query>         fuzzy-find launcher shortcuts");
+        AppendLine("  run <cmd>                 run a shell command and print output");
+        AppendLine("  pwd | cd <path>           get/set working directory");
+        AppendLine("  ls [path]                 list files and folders");
+        AppendLine("  win list                  list visible windows");
+        AppendLine("  win close <index>         close window from latest list");
+        AppendLine("  alias list                list aliases");
+        AppendLine("  alias add <n> <cmd>       create alias");
+        AppendLine("  alias remove <n>          remove alias");
+        AppendLine("  alias path                show alias file location");
+        AppendLine("  startup on|off|status     configure launch at sign-in");
+        AppendLine("  stealth on|off|status     hide taskbar while skin is active");
+        AppendLine("  taskbar hide|show|status  manual taskbar visibility");
+        AppendLine("  top on|off                keep skin window always on top");
+        AppendLine("  version                   show app version");
+        AppendLine("  stats                     show GitHub usage metrics");
+        AppendLine("  about                     show project links");
+        AppendLine("  clear | cls               clear terminal output");
+        AppendLine("  exit | quit               close skin");
     }
 
     private void ChangeDirectory(string[] args)
@@ -292,7 +346,26 @@ public partial class MainWindow : Window
         }
 
         var target = string.Join(' ', args);
-        var launchTarget = ResolveOpenTarget(target);
+        var resolution = ResolveOpenTarget(target);
+
+        if (resolution.LaunchTarget is null)
+        {
+            if (resolution.Suggestions.Count > 0)
+            {
+                AppendLine($"no exact match for '{target}'. suggestions:");
+                foreach (var suggestion in resolution.Suggestions)
+                {
+                    AppendLine($"  - {suggestion}");
+                }
+
+                return;
+            }
+
+            AppendLine($"error: could not resolve target: {target}");
+            return;
+        }
+
+        var launchTarget = resolution.LaunchTarget;
 
         try
         {
@@ -303,6 +376,12 @@ public partial class MainWindow : Window
                 UseShellExecute = true
             });
             AppendLine($"opened: {target}");
+
+            if (!string.IsNullOrWhiteSpace(resolution.MatchedShortcut) &&
+                !resolution.MatchedShortcut.Equals(target, StringComparison.OrdinalIgnoreCase))
+            {
+                AppendLine($"fuzzy> {target} -> {resolution.MatchedShortcut}");
+            }
         }
         catch
         {
@@ -321,12 +400,62 @@ public partial class MainWindow : Window
                 }
                 catch
                 {
-                    // Falls through to final message.
+                    // Falls through to final error.
+                }
+            }
+
+            if (resolution.Suggestions.Count > 0)
+            {
+                AppendLine("did you mean:");
+                foreach (var suggestion in resolution.Suggestions)
+                {
+                    AppendLine($"  - {suggestion}");
                 }
             }
 
             AppendLine($"error: could not open {target}");
         }
+    }
+
+    private void ManageAppShortcuts(string[] args)
+    {
+        if (args.Length == 0 || args[0].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendLine("launcher shortcuts:");
+            foreach (var key in _appShortcuts.Keys.OrderBy(key => key, StringComparer.OrdinalIgnoreCase))
+            {
+                AppendLine($"  {key} -> {_appShortcuts[key]}");
+            }
+
+            return;
+        }
+
+        if (args[0].Equals("find", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length < 2)
+            {
+                AppendLine("usage: apps find <query>");
+                return;
+            }
+
+            var query = string.Join(' ', args.Skip(1));
+            var matches = FuzzyMatcher.Rank(query, _appShortcuts.Keys, 8);
+            if (matches.Count == 0)
+            {
+                AppendLine("no app shortcut matches found");
+                return;
+            }
+
+            AppendLine($"matches for '{query}':");
+            foreach (var match in matches)
+            {
+                AppendLine($"  {match} -> {_appShortcuts[match]}");
+            }
+
+            return;
+        }
+
+        AppendLine("usage: apps list | apps find <query>");
     }
 
     private async Task RunShellCommandAsync(string[] args)
@@ -404,6 +533,158 @@ public partial class MainWindow : Window
 
         Topmost = value == "on";
         AppendLine($"top mode: {value}");
+    }
+
+    private void ManageStartup(string[] args)
+    {
+        if (args.Length == 0 || args[0].Equals("status", StringComparison.OrdinalIgnoreCase))
+        {
+            var enabled = _startupManager.IsEnabled();
+            AppendLine($"startup: {(enabled ? "on" : "off")}");
+            var commandLine = _startupManager.GetCommandLine();
+            if (!string.IsNullOrWhiteSpace(commandLine))
+            {
+                AppendLine($"run key command: {commandLine}");
+            }
+
+            return;
+        }
+
+        if (args[0].Equals("on", StringComparison.OrdinalIgnoreCase))
+        {
+            var processPath = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
+            if (string.IsNullOrWhiteSpace(processPath))
+            {
+                AppendLine("error: unable to resolve process path for startup entry");
+                return;
+            }
+
+            _startupManager.Enable(processPath, StartupArg);
+            AppendLine("startup enabled");
+            return;
+        }
+
+        if (args[0].Equals("off", StringComparison.OrdinalIgnoreCase))
+        {
+            _startupManager.Disable();
+            AppendLine("startup disabled");
+            return;
+        }
+
+        AppendLine("usage: startup on|off|status");
+    }
+
+    private void ManageStealthMode(string[] args)
+    {
+        if (args.Length == 0 || args[0].Equals("status", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendLine($"stealth mode: {(_settings.StealthMode ? "on" : "off")}");
+            AppendLine($"taskbar visible: {(TaskbarManager.IsVisible() ? "yes" : "no")}");
+            return;
+        }
+
+        if (args[0].Equals("on", StringComparison.OrdinalIgnoreCase))
+        {
+            SetStealthMode(true, persist: true, announce: true);
+            return;
+        }
+
+        if (args[0].Equals("off", StringComparison.OrdinalIgnoreCase))
+        {
+            SetStealthMode(false, persist: true, announce: true);
+            return;
+        }
+
+        AppendLine("usage: stealth on|off|status");
+    }
+
+    private void ManageTaskbar(string[] args)
+    {
+        if (args.Length == 0 || args[0].Equals("status", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendLine($"taskbar visible: {(TaskbarManager.IsVisible() ? "yes" : "no")}");
+            AppendLine($"managed by skin: {(_taskbarHiddenBySkin ? "yes" : "no")}");
+            return;
+        }
+
+        if (args[0].Equals("hide", StringComparison.OrdinalIgnoreCase))
+        {
+            var hidden = HideTaskbarFromSkin();
+            AppendLine(hidden ? "taskbar hidden" : "warning: could not hide taskbar");
+            return;
+        }
+
+        if (args[0].Equals("show", StringComparison.OrdinalIgnoreCase))
+        {
+            ShowTaskbarFromSkin();
+            AppendLine("taskbar shown");
+            return;
+        }
+
+        AppendLine("usage: taskbar hide|show|status");
+    }
+
+    private void SetStealthMode(bool enabled, bool persist, bool announce)
+    {
+        if (enabled)
+        {
+            var hidden = HideTaskbarFromSkin();
+            if (persist)
+            {
+                _settings.StealthMode = true;
+                _settingsStore.Save(_settings);
+            }
+
+            if (announce)
+            {
+                AppendLine(hidden
+                    ? "stealth mode enabled"
+                    : "warning: stealth mode requested, but taskbar could not be hidden");
+            }
+
+            return;
+        }
+
+        ShowTaskbarFromSkin();
+        if (persist)
+        {
+            _settings.StealthMode = false;
+            _settingsStore.Save(_settings);
+        }
+
+        if (announce)
+        {
+            AppendLine("stealth mode disabled");
+        }
+    }
+
+    private bool HideTaskbarFromSkin()
+    {
+        if (_taskbarHiddenBySkin)
+        {
+            return true;
+        }
+
+        var changed = TaskbarManager.SetVisible(false);
+        if (changed || !TaskbarManager.IsVisible())
+        {
+            _taskbarHiddenBySkin = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ShowTaskbarFromSkin()
+    {
+        if (!_taskbarHiddenBySkin)
+        {
+            _ = TaskbarManager.SetVisible(true);
+            return;
+        }
+
+        _ = TaskbarManager.SetVisible(true);
+        _taskbarHiddenBySkin = false;
     }
 
     private void ControlWindows(string[] args)
@@ -548,23 +829,44 @@ public partial class MainWindow : Window
         return Path.GetFullPath(Path.Combine(_workingDirectory, expandedPath));
     }
 
-    private string ResolveOpenTarget(string rawTarget)
+    private OpenResolution ResolveOpenTarget(string rawTarget)
     {
         if (_appShortcuts.TryGetValue(rawTarget, out var mapped))
         {
-            return mapped;
+            return new OpenResolution(mapped, rawTarget, []);
         }
 
         if (rawTarget.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
             rawTarget.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
-            return rawTarget;
+            return new OpenResolution(rawTarget, null, []);
         }
 
         var resolvedPath = ResolvePath(rawTarget);
-        return File.Exists(resolvedPath) || Directory.Exists(resolvedPath)
-            ? resolvedPath
-            : rawTarget;
+        if (File.Exists(resolvedPath) || Directory.Exists(resolvedPath))
+        {
+            return new OpenResolution(resolvedPath, null, []);
+        }
+
+        if (rawTarget.Contains('\\') || rawTarget.Contains('/') ||
+            (rawTarget.Contains(':') && rawTarget.Length > 1))
+        {
+            return new OpenResolution(rawTarget, null, []);
+        }
+
+        var suggestions = FuzzyMatcher.Rank(rawTarget, _appShortcuts.Keys, 5);
+        if (suggestions.Count == 1)
+        {
+            var suggestion = suggestions[0];
+            if (suggestion.StartsWith(rawTarget, StringComparison.OrdinalIgnoreCase))
+            {
+                return new OpenResolution(_appShortcuts[suggestion], suggestion, suggestions);
+            }
+        }
+
+        return suggestions.Count > 0
+            ? new OpenResolution(null, null, suggestions)
+            : new OpenResolution(rawTarget, null, []);
     }
 
     private void MoveHistory(int delta)
@@ -671,7 +973,7 @@ public partial class MainWindow : Window
     private void UpdateStatusBar()
     {
         CurrentDirectoryText.Text = _workingDirectory;
-        HintText.Text = $"panic: Ctrl+Alt+Backspace | top: {(Topmost ? "on" : "off")}";
+        HintText.Text = $"panic: Ctrl+Alt+Backspace | top: {(Topmost ? "on" : "off")} | stealth: {(_settings.StealthMode ? "on" : "off")}";
     }
 
     private void FocusCommandInput()
@@ -679,4 +981,6 @@ public partial class MainWindow : Window
         CommandInput.Focus();
         CommandInput.CaretIndex = CommandInput.Text.Length;
     }
+
+    private sealed record OpenResolution(string? LaunchTarget, string? MatchedShortcut, IReadOnlyList<string> Suggestions);
 }
