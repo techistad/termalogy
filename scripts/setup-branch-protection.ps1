@@ -19,6 +19,7 @@ $body = @{
     }
     restrictions                   = $null
     required_linear_history        = $true
+    required_conversation_resolution = $true
     allow_force_pushes             = $false
     allow_deletions                = $false
 }
