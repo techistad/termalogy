@@ -2,9 +2,11 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
 using TermalogySkin.Services;
 
 namespace TermalogySkin;
@@ -14,6 +16,12 @@ public partial class MainWindow : Window
     private const string RepoOwner = "techistad";
     private const string RepoName = "termalogy";
     private const string StartupArg = "--startup";
+    private const int PanicHotKeyId = 0x1985;
+    private const int WmHotKey = 0x0312;
+    private const uint ModAlt = 0x0001;
+    private const uint ModControl = 0x0002;
+    private const uint ModNoRepeat = 0x4000;
+    private const uint VkBack = 0x08;
 
     private readonly StringBuilder _screenBuffer = new();
     private readonly List<string> _history = [];
@@ -47,6 +55,10 @@ public partial class MainWindow : Window
     private int _historyIndex;
     private bool _commandRunning;
     private bool _taskbarHiddenBySkin;
+    private bool _panicExitTriggered;
+    private bool _panicHotKeyRegistered;
+    private IntPtr _windowHandle;
+    private HwndSource? _windowSource;
 
     public MainWindow()
     {
@@ -61,6 +73,16 @@ public partial class MainWindow : Window
 
         Activated += (_, _) => FocusCommandInput();
         Closed += Window_Closed;
+        SourceInitialized += Window_SourceInitialized;
+    }
+
+    private void Window_SourceInitialized(object? sender, EventArgs e)
+    {
+        _windowHandle = new WindowInteropHelper(this).Handle;
+        _windowSource = HwndSource.FromHwnd(_windowHandle);
+        _windowSource?.AddHook(WindowProc);
+
+        _panicHotKeyRegistered = RegisterHotKey(_windowHandle, PanicHotKeyId, ModControl | ModAlt | ModNoRepeat, VkBack);
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -82,12 +104,29 @@ public partial class MainWindow : Window
             SetStealthMode(true, persist: false, announce: true);
         }
 
+        if (!_panicHotKeyRegistered)
+        {
+            AppendLine("warning: global panic hotkey registration failed (Ctrl+Alt+Backspace).");
+        }
+
         AppendLine(string.Empty);
         FocusCommandInput();
     }
 
     private void Window_Closed(object? sender, EventArgs e)
     {
+        if (_panicHotKeyRegistered && _windowHandle != IntPtr.Zero)
+        {
+            _ = UnregisterHotKey(_windowHandle, PanicHotKeyId);
+            _panicHotKeyRegistered = false;
+        }
+
+        if (_windowSource is not null)
+        {
+            _windowSource.RemoveHook(WindowProc);
+            _windowSource = null;
+        }
+
         if (_taskbarHiddenBySkin)
         {
             TaskbarManager.SetVisible(true);
@@ -97,14 +136,37 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        var hasCtrlAlt = Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Alt);
+        var hasCtrlAlt = (Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) ==
+                         (ModifierKeys.Control | ModifierKeys.Alt);
         var isBackspace = e.Key == Key.Back || (e.Key == Key.System && e.SystemKey == Key.Back);
         if (hasCtrlAlt && isBackspace)
         {
-            AppendLine("panic hotkey triggered, exiting skin...");
-            Close();
+            TriggerPanicExit();
             e.Handled = true;
         }
+    }
+
+    private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmHotKey && wParam.ToInt32() == PanicHotKeyId)
+        {
+            TriggerPanicExit();
+            handled = true;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void TriggerPanicExit()
+    {
+        if (_panicExitTriggered)
+        {
+            return;
+        }
+
+        _panicExitTriggered = true;
+        AppendLine("panic hotkey triggered, exiting skin...");
+        Close();
     }
 
     private async void CommandInput_KeyDown(object sender, KeyEventArgs e)
@@ -287,6 +349,7 @@ public partial class MainWindow : Window
         AppendLine("  version                   show app version");
         AppendLine("  stats                     show GitHub usage metrics");
         AppendLine("  about                     show project links");
+        AppendLine("  panic key                 Ctrl+Alt+Backspace (global close)");
         AppendLine("  clear | cls               clear terminal output");
         AppendLine("  exit | quit               close skin");
     }
@@ -376,6 +439,7 @@ public partial class MainWindow : Window
                 UseShellExecute = true
             });
             AppendLine($"opened: {target}");
+            MoveSkinOutOfTheWayAfterLaunch();
 
             if (!string.IsNullOrWhiteSpace(resolution.MatchedShortcut) &&
                 !resolution.MatchedShortcut.Equals(target, StringComparison.OrdinalIgnoreCase))
@@ -396,6 +460,7 @@ public partial class MainWindow : Window
                         UseShellExecute = true
                     });
                     AppendLine($"opened: {target}");
+                    MoveSkinOutOfTheWayAfterLaunch();
                     return;
                 }
                 catch
@@ -414,6 +479,27 @@ public partial class MainWindow : Window
             }
 
             AppendLine($"error: could not open {target}");
+        }
+    }
+
+    private void MoveSkinOutOfTheWayAfterLaunch()
+    {
+        if (Topmost)
+        {
+            Topmost = false;
+            AppendLine("top mode auto-off so launched app stays visible");
+        }
+
+        if (_settings.StealthMode || _taskbarHiddenBySkin)
+        {
+            AppendLine("stealth mode active: shell not minimized");
+            return;
+        }
+
+        if (WindowState != WindowState.Minimized)
+        {
+            WindowState = WindowState.Minimized;
+            AppendLine("skin minimized (restore from taskbar when needed)");
         }
     }
 
@@ -981,6 +1067,12 @@ public partial class MainWindow : Window
         CommandInput.Focus();
         CommandInput.CaretIndex = CommandInput.Text.Length;
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     private sealed record OpenResolution(string? LaunchTarget, string? MatchedShortcut, IReadOnlyList<string> Suggestions);
 }
