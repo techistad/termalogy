@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: release-windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve tag and version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag.StartsWith("v")) {
+            throw "Tag must start with v (for example v0.1.0)."
+          }
+          $version = $tag.Substring(1)
+          "TAG_NAME=$tag" >> $env:GITHUB_ENV
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Publish win-x64
+        shell: pwsh
+        run: |
+          dotnet restore .\Termalogy.sln
+          dotnet publish .\TermalogySkin\TermalogySkin.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:Version=$env:APP_VERSION `
+            -o .\publish\win-x64
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          $zip = "TermalogySkin-$env:TAG_NAME-win-x64.zip"
+          Compress-Archive -Path .\publish\win-x64\* -DestinationPath ".\publish\$zip" -Force
+          "RELEASE_ZIP=$zip" >> $env:GITHUB_ENV
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:TAG_NAME
+          $asset = ".\publish\$env:RELEASE_ZIP"
+
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset --clobber
+          }
+          else {
+            gh release create $tag $asset --title "Termalogy $tag" --generate-notes
+          }

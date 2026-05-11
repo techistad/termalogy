@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  branch-policy:
+    name: branch-policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR is from a non-main branch
+        run: |
+          if [ "${{ github.head_ref }}" = "main" ]; then
+            echo "Pull requests from main are not allowed. Create a feature branch." >&2
+            exit 1
+          fi
+
+  build-windows:
+    name: build-windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore .\Termalogy.sln
+
+      - name: Build
+        run: dotnet build .\Termalogy.sln -c Release --no-restore
