@@ -11,7 +11,7 @@
         Background="#050805"
         Foreground="#96FF96"
         FontFamily="Cascadia Mono,Consolas"
-        Topmost="True"
+        Topmost="False"
         Loaded="Window_Loaded"
         PreviewKeyDown="Window_PreviewKeyDown">
     <Grid Margin="16">
