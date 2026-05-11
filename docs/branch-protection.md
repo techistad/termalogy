@@ -7,7 +7,9 @@ This repository expects `main` to be protected.
 In repository settings, configure protection for `main`:
 
 - Require a pull request before merging
-- Require at least 1 approval
+- Require approvals:
+  - Solo maintainer setup: `0`
+  - Team setup: `1+`
 - Require status checks to pass before merging
   - `branch-policy`
   - `build-windows`
