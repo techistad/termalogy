@@ -11,8 +11,10 @@ Terminal-first skin layer for Windows. GUI apps still run normally, but you acce
 
 - Full-screen terminal skin UI (safe, non-destructive)
 - Panic exit hotkey: `Ctrl+Alt+Backspace`
-- Command-driven launcher (`open`, `run`, `win list`, `alias`, etc.)
+- Command-driven launcher with fuzzy app matching (`open`, `apps find`)
 - Alias persistence in LocalAppData
+- Startup-on-login toggle (`startup on|off|status`)
+- Stealth mode with taskbar control (`stealth`, `taskbar`)
 - Open-source workflow with CI + release tags
 
 ## Install (From GitHub Releases)
@@ -41,10 +43,14 @@ dotnet run --project .\TermalogySkin\TermalogySkin.csproj
 
 - `help`
 - `open <app|url|path>`
+- `apps list`, `apps find <query>`
 - `run <cmd>`
 - `pwd`, `cd <path>`, `ls [path]`
 - `win list`, `win close <index>`
 - `alias list|add|remove|path`
+- `startup on|off|status`
+- `stealth on|off|status`
+- `taskbar hide|show|status`
 - `version` (app version)
 - `stats` (GitHub stars, forks, release downloads)
 - `top on|off`
